@@ -18,7 +18,7 @@ Modern backend systems must:
 Hayaku simulates these real-world backend concerns in a single, focused system.
 
 
-##\ High-Level Architecture
+## High-Level Architecture
 - API Layer
 - Rate Limiter
 - Job Queue

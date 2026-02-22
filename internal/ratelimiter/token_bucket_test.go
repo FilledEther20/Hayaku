@@ -1,15 +1,20 @@
 package ratelimiter
 
-import "testing"
+// import (
+// 	"math/rand"
+// 	"testing"
+// )
 
-func randomCapacity(){
+// func randomCapacity() int64 {
+// 	return rand.Int63n(65)
+// }
 
-}
+// func randomTokens() *tokens {
 
-func randomTokens(){
+// }
 
-}
+// func TestNewTokenBucket(t *testing.T) {
+// 	orgCap := randomCapacity()
+// 	orgToken := randomTokens()
 
-func TestNewTokenBucket(t *testing.T){
-
-}
+// }
