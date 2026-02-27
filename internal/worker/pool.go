@@ -2,19 +2,17 @@ package worker
 
 import (
 	"sync"
-
-	"github.com/FilledEther20/Hayaku/internal/job"
 )
 
 type Pool struct {
-	JobQueue   chan job.Job
+	JobQueue   chan Job
 	MaxWorkers int
 	wg         sync.WaitGroup
 }
 
 func NewPool(maxWorkers int, queueSize int) *Pool {
 	return &Pool{
-		JobQueue:   make(chan job.Job, queueSize),
+		JobQueue:   make(chan Job, queueSize),
 		MaxWorkers: maxWorkers,
 	}
 }
@@ -22,7 +20,5 @@ func NewPool(maxWorkers int, queueSize int) *Pool {
 func (p *Pool) Start() {
 	for i := 0; i < p.MaxWorkers; i++ {
 		p.wg.Add(i)
-		go p.worker(i)
 	}
 }
-
