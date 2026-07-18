@@ -237,6 +237,9 @@ Modern backend systems must:
 Hayaku simulates these real-world backend concerns in a single, focused system.
 
 
+It is a Ongoing Product
+
+
 ## High-Level Architecture
 - API Layer
 - Rate Limiter
