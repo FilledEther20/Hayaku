@@ -21,13 +21,11 @@ func (h *HayakuHandler) HandleSubmitJob(w http.ResponseWriter, r *http.Request) 
 
 	job := parseJobFromRequest(r)
 
-	
 	err := h.Queue.Enqueue(r.Context(), job)
 	if err != nil {
 		http.Error(w, "503 Service Unavailable (Queue Full)", http.StatusServiceUnavailable)
 		return
 	}
-
 
 	w.WriteHeader(http.StatusAccepted)
 	w.Write([]byte("Job accepted"))

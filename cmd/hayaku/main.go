@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/FilledEther20/Hayaku/internal/ratelimiter"
@@ -21,13 +20,14 @@ func main() {
 	// defer cancel()
 	// bucket.Start(ctx)
 
-	for i := 0; i < 7; i++ {
-		if limiter.Allow("user_1") {
-			fmt.Printf("Request %d: Allowed\n", i+1)
-		} else {
-			fmt.Printf("Request %d: Denied\n", i+1)
-		}
-	}
+	// Simple testing
+	// for i := 0; i < 7; i++ {
+	// 	if limiter.Allow("user_1") {
+	// 		fmt.Printf("Request %d: Allowed\n", i+1)
+	// 	} else {
+	// 		fmt.Printf("Request %d: Denied\n", i+1)
+	// 	}
+	// }
 
 	// for i := 0; i < 10; i++ {
 	// 	startAt := time.Now()
