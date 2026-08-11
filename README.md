@@ -284,6 +284,8 @@ It is a Ongoing Product
 - CLI interface for submitting jobs and simulating load
 - (Planned) HTTP API for external integration
 
+
+Further Tests and Metrics performance would be added and is a work in progress...
 ## Rate Limiting (Token Bucket)
 
 Hayaku uses an in-memory **Token Bucket** rate limiter to control how frequently a user can submit requests.
