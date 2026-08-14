@@ -23,7 +23,7 @@ local window = tonumber(ARGV[2])
 local limit = tonumber(ARGV[3])
 local member = ARGV[4]
 
-redis.call('ZREMRANGEBYSCORE', key, , now - window)
+redis.call('ZREMRANGEBYSCORE', key, '-inf' , now - window)
 
 local current_count = redis.call('ZCARD', key)
 if current_count < limit then
