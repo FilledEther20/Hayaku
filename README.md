@@ -1,16 +1,18 @@
 # Hayaku
 
-**Hayaku** is a Go backend infrastructure library that combines a **distributed rate limiter** with an **async job queue and worker pool**. It provides the core building blocks for protecting APIs from abuse and processing tasks asynchronously at scale.
+**Hayaku** is a Go rate limiting library with a built-in async telemetry pipeline. It answers two questions for any backend service:
+1. **Is this request rate limited?**
+2. **What are the metrics — region, time, failure reason — for analysis?**
 
 ---
 
 ## Features
 
 - **Two rate limiting strategies** — Token Bucket (in-memory, per-user) and Sliding Window (Redis-backed, distributed)
-- **Pluggable interfaces** — `RateLimiter` and `Queue` are defined as interfaces; swap implementations without touching business logic
-- **Concurrent worker pool** — Processes queued jobs across configurable goroutine workers
-- **Automatic cleanup** — Manager sweeper reclaims memory for inactive user buckets
-- **Atomic Redis operations** — Sliding window uses a pre-loaded Lua script for race-free counting
+- **Async telemetry pipeline** — every request fires a non-blocking event; a background goroutine writes metrics without adding latency to the request path
+- **Pluggable emitters** — default in-memory store for `GetMetrics()`; optional OpenTelemetry integration for Grafana/Datadog dashboards (coming)
+- **Pluggable `RateLimiter` interface** — swap strategies without touching application code
+- **Automatic bucket cleanup** — Manager sweeper reclaims goroutines and memory for inactive users
 
 ---
 
@@ -20,27 +22,30 @@
 Client Request
      │
      ▼
-┌─────────────────────┐
-│   HTTP Handler      │  ← Extracts X-User-ID header
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐          ┌──────────────────────────┐
-│   Rate Limiter      │          │  Strategy A: Token Bucket │
-│   (core.RateLimiter)│ ──────►  │  In-memory, per-user     │
-└────────┬────────────┘          ├──────────────────────────┤
-         │                       │  Strategy B: Sliding      │
-         │ allowed               │  Window (Redis ZSET)      │
-         ▼                       └──────────────────────────┘
-┌─────────────────────┐
-│   Job Queue         │  ← core.Queue interface
-│   (core.Queue)      │
-└────────┬────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│   Worker Pool       │  ← Concurrent job execution
-└─────────────────────┘
+InstrumentedLimiter.Allow(userID, ip, region)
+     │
+     ├── inner.Allow(userID)           ← actual rate limit check
+     │        │
+     │   ┌────┴────────────────────────────────┐
+     │   │  Strategy A: Token Bucket           │
+     │   │  In-memory, per-user, no deps       │
+     │   ├─────────────────────────────────────┤
+     │   │  Strategy B: Sliding Window Redis   │
+     │   │  Distributed, Lua atomic script     │
+     │   └─────────────────────────────────────┘
+     │
+     ├── fire RequestEvent to buffered channel (non-blocking, drop if full)
+     │
+     └── return bool immediately
+
+Background drain() goroutine:
+     reads channel → Emitter.Emit(event)
+          │
+     ┌────┴──────────────────────────────┐
+     │  InMemoryEmitter (default)        │  → GetMetrics() Snapshot
+     ├───────────────────────────────────┤
+     │  OTelEmitter (optional import)    │  → Grafana / Datadog / Prometheus
+     └───────────────────────────────────┘
 ```
 
 ---
@@ -50,22 +55,64 @@ Client Request
 ```
 hayaku/
 ├── cmd/hayaku/
-│   └── main.go                    # Entry point / test harness
+│   └── main.go
 ├── internal/
 │   ├── api/
-│   │   └── handler.go             # HTTP handler (HandleSubmitJob)
+│   │   └── handler.go               # HTTP handler — rate limit → 429/202
 │   ├── core/
-│   │   ├── job.go                 # Job interface
-│   │   ├── limiter.go             # RateLimiter interface
-│   │   └── queue.go               # Queue interface
+│   │   ├── limiter.go               # RateLimiter interface
+│   │   ├── job.go                   # Job interface
+│   │   └── queue.go                 # Queue interface
 │   ├── ratelimiter/
-│   │   ├── token_bucket.go        # Token Bucket algorithm
-│   │   ├── manager.go             # Per-user bucket manager with sweeper
-│   │   └── sliding_window_redis.go# Redis-backed sliding window
-│   └── worker/
-│       ├── job.go                 # Worker-local Job interface
-│       └── pool.go                # Goroutine worker pool
+│   │   ├── token_bucket.go          # Channel-based token bucket
+│   │   ├── manager.go               # Per-user bucket manager + sweeper
+│   │   └── sliding_window_redis.go  # Redis ZSET + atomic Lua script
+│   └── metrics/
+│       ├── event.go                 # RequestEvent, DenyReasonEnum
+│       ├── collector.go             # MetricStore, Snapshot
+│       └── instrumented.go         # InstrumentedLimiter — wraps any RateLimiter
 └── go.mod
+```
+
+---
+
+## Usage
+
+### Basic — no metrics
+
+```go
+rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+limiter := ratelimiter.NewSlidingWindowRedis(rdb, 2*time.Second, 5)
+
+allowed := limiter.Allow("user_123")
+```
+
+### With metrics
+
+```go
+base    := ratelimiter.NewSlidingWindowRedis(rdb, 2*time.Second, 5)
+limiter := metrics.NewInstrumentedLimiter(base, 1024) // bufferSize=1024
+defer limiter.Stop()
+
+allowed := limiter.Allow("user_123", "203.0.113.1", "IN")
+
+snap := limiter.GetMetrics()
+fmt.Println(snap.Total, snap.Allowed, snap.Rejected)
+fmt.Println(snap.ByRegion)   // map[IN:9]
+fmt.Println(snap.ByHour)     // map[14:9]  ← UTC hour
+fmt.Println(snap.DenialReasons)
+```
+
+### With OpenTelemetry (coming)
+
+```go
+// optional import — users who don't want OTel never compile it
+import hkotel "github.com/FilledEther20/Hayaku/internal/metrics/otel"
+
+limiter := metrics.NewInstrumentedLimiter(base, 1024,
+    metrics.WithEmitter(hkotel.New(otel.GetMeterProvider())),
+)
+// metrics flow to Grafana / Datadog / Prometheus automatically
 ```
 
 ---
@@ -74,135 +121,89 @@ hayaku/
 
 ### Token Bucket (in-memory)
 
-Each user gets a dedicated token bucket created on first request. Tokens are refilled at a fixed rate and capped at the configured capacity.
-
 ```go
-// capacity = max burst, rate = tokens refilled per second
-bucket := ratelimiter.NewTokenBucket(capacity int64, rate int64)
+bucket := ratelimiter.NewTokenBucket(capacity, rate) // capacity=burst, rate=tokens/sec
+bucket.Start(ctx)        // starts background refill goroutine
 
-// Start the background refill goroutine
-ctx, cancel := context.WithCancel(context.Background())
-defer cancel()
-bucket.Start(ctx)
-
-// Non-blocking check (used by Allow)
-// <-bucket.tokensPresent
-
-// Blocking wait — caller suspends until a token is available
-err := bucket.Wait(ctx)
+bucket.Wait(ctx)         // blocks until token available
 ```
 
-The `Manager` wraps `TokenBucket` to provide per-user isolation, lazy initialization, and automatic cleanup:
+The `Manager` gives each user their own bucket, created lazily on first request:
 
 ```go
-manager := &ratelimiter.Manager{ /* rate, cap */ }
-manager.StartSweeper(ctx, 1*time.Hour) // clean up inactive users
-
-allowed := manager.Allow("user_123") // true / false
+manager.Allow("user_123")            // creates bucket on first call
+manager.StartSweeper(ctx, 1*time.Hour) // cancels and removes inactive buckets
 ```
-
-**Sweeper**: runs every 5 minutes and cancels + removes buckets for users not seen within the TTL.
 
 ### Sliding Window (Redis)
 
-Tracks requests inside a rolling time window using a Redis sorted set. Works correctly across multiple application instances.
-
 ```go
-rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 limiter := ratelimiter.NewSlidingWindowRedis(rdb, 2*time.Second, 5)
-// → max 5 requests per 2-second window per user
-
-allowed := limiter.Allow("user_123")
+limiter.Allow("user_123")
 ```
 
-**How it works (Lua script, atomic):**
-1. Remove members older than `now - window` (`ZREMRANGEBYSCORE`)
-2. Count remaining members (`ZCARD`)
-3. If count < limit → add current request (`ZADD`) and set TTL (`EXPIRE`), return `1`
-4. Otherwise return `0`
+Atomic Lua script per request:
+1. `ZREMRANGEBYSCORE` — remove entries outside the window
+2. `ZCARD` — count remaining
+3. `ZADD` — add if under limit
+4. `EXPIRE` — set TTL to bound memory
 
-Redis key format: `ratelimit:<userID>`
+Redis key: `ratelimit:<userID>`
+
+---
+
+## Telemetry
+
+Every call to `Allow()` records:
+
+| Field | Description |
+|-------|-------------|
+| `Timestamp` | UTC time of request |
+| `UserID` | from `X-User-ID` header or caller |
+| `IP` | client IP |
+| `Region` | e.g. `CF-IPCountry` header value |
+| `Allowed` | bool |
+| `Reason` | `None` / `RateLimited` / `BackendDown` / `NetworkError` |
+| `Latency` | time spent in `Allow()` |
+
+`GetMetrics()` returns a deep-copy snapshot — safe to read while the limiter continues writing.
 
 ---
 
 ## HTTP API
 
-### `POST /jobs/submit`
-
-| Component | Detail |
-|-----------|--------|
-| Header | `X-User-ID: <id>` (required) |
-| Success | `202 Accepted` — job enqueued |
-| Rate limited | `429 Too Many Requests` |
-| Queue full | `503 Service Unavailable` |
-
-```go
-handler := &api.HayakuHandler{
-    Limiter: limiter, // any core.RateLimiter
-    Queue:   queue,   // any core.Queue
-}
-http.HandleFunc("/jobs/submit", handler.HandleSubmitJob)
 ```
+POST /jobs/submit
+Header: X-User-ID: <id>
 
----
-
-## Core Interfaces
-
-```go
-// Any job must implement:
-type Job interface {
-    ID() string
-    Execute(ctx context.Context) error
-}
-
-// Any rate limiter must implement:
-type RateLimiter interface {
-    Allow(userID string) bool
-}
-
-// Any queue must implement:
-type Queue interface {
-    Enqueue(ctx context.Context, j Job) error
-    Dequeue(ctx context.Context) (Job, error)
-}
+202 Accepted          — allowed
+429 Too Many Requests — rate limited
+503 Service Unavailable — queue full
 ```
-
----
-
-## Worker Pool
-
-```go
-pool := worker.NewPool(maxWorkers int, queueSize int)
-pool.Start()
-```
-
-Workers pull jobs off `pool.JobQueue` and call `job.Execute(ctx)` concurrently.
 
 ---
 
 ## Getting Started
 
-### Prerequisites
-
-- Go 1.21+
-- Redis (for sliding window rate limiter)
-
-### Install
-
 ```bash
 git clone https://github.com/FilledEther20/Hayaku.git
 cd Hayaku
 go mod download
-```
-
-### Run
-
-```bash
-# Start Redis (if using sliding window)
-redis-server
-
+redis-server &
 go run ./cmd/hayaku
 ```
+
+**Prerequisites**: Go 1.23+, Redis
+
+---
+
+## Roadmap
+
+- [ ] OpenTelemetry emitter (`internal/metrics/otel`)
+- [ ] Functional options on `NewInstrumentedLimiter`
+- [ ] Benchmark suite — p99 latency under concurrent load
+- [ ] `NOSCRIPT` retry on Redis restart
+- [ ] HTTP server wired in `main.go`
 
 ---
 
@@ -210,7 +211,7 @@ go run ./cmd/hayaku
 
 | Module | Purpose |
 |--------|---------|
-| `github.com/redis/go-redis/v9` | Redis client for distributed rate limiting |
+| `github.com/redis/go-redis/v9` | Sliding window rate limit + optional Redis metrics |
 | `github.com/google/uuid` | Unique member IDs in sliding window ZSET |
 
 ---
@@ -218,98 +219,3 @@ go run ./cmd/hayaku
 ## License
 
 MIT © 2025 Chaitanya Gairola
-
-## What is Hayaku?
-Hayaku is a Golang based project solving the age old problem of efficiency in terms of security and job processing. Modern backend systems must protect themselves from abuse while processing tasks asynchronously at scale. This project implements a rate-limiting service combined with a job queue to simulate real-world backend infrastructure.
-
-Abstract overview of how Hayaku works:  
-- Client hits the layer 
-- Hayaku validates the rate limit then sends it 
-- Tasks are processed concurrently by the workers
-
-## Why this project exists
-
-Modern backend systems must:
-- Protect themselves from abuse
-- Handle tasks asynchronously
-- Remain reliable under load
-
-Hayaku simulates these real-world backend concerns in a single, focused system.
-
-
-It is a Ongoing Product
-
-
-## High-Level Architecture
-- API Layer
-- Rate Limiter
-- Job Queue
-- Worker Pool
-- Storage (In-memory / Redis)
-
-## Planned Components
-- Token Bucket Rate Limiter
-- Per-user quotas
-- Job submission endpoint
-- Worker pool with retries
-- Failure handling and backoff
-
-## Features
-### Rate Limiting
-- Token Bucket based rate limiter
-- Per-user request quotas
-- Configurable refill rates
-- Rejects requests exceeding limits with clear errors
-
-### Job Queue
-- Asynchronous job submission
-- In-memory queue with pluggable storage (Redis-ready)
-- FIFO processing semantics
-
-### Worker Pool
-- Configurable number of workers
-- Concurrent job execution
-- Graceful shutdown handling
-
-### Reliability
-- Automatic retries for failed jobs
-- Exponential backoff strategy
-- Dead-letter handling (planned)
-
-### Observability
-- Basic runtime metrics (jobs processed, failures, rejections)
-- Structured logging for debugging
-
-### Interfaces
-- CLI interface for submitting jobs and simulating load
-- (Planned) HTTP API for external integration
-
-
-Further Tests and Metrics performance would be added and is a work in progress...
-## Rate Limiting (Token Bucket)
-
-Hayaku uses an in-memory **Token Bucket** rate limiter to control how frequently a user can submit requests.
-
-### How it works
-- Each user is associated with a token bucket of fixed capacity.
-- Tokens represent permission to process a request.
-- A background goroutine refills tokens at a fixed rate.
-- If no token is available, the request blocks or fails based on context.
-
-### Why Token Bucket
-- Allows short bursts while enforcing an average rate
-- Simple and efficient for in-memory rate limiting
-- Commonly used in real-world backend systems
-
-### Current Guarantees
-- Thread-safe token consumption using Go channels
-- Bounded capacity (no token overflow)
-- Context-aware waiting and cancellation
-- Graceful shutdown of refill loop
-
-### Limitations
-- In-memory only (single-node)
-- Not suitable for distributed rate limiting yet
-- Token state is lost on process restart
-
-Future versions may use Redis or another shared store to support distributed rate limiting.
