@@ -1,3 +1,4 @@
+// Package ratelimiter provides in-memory and Redis-backed rate limiting strategies.
 package ratelimiter
 
 import (

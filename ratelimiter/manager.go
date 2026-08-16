@@ -1,3 +1,4 @@
+// Package ratelimiter provides in-memory and Redis-backed rate limiting strategies.
 package ratelimiter
 
 import (
@@ -17,6 +18,15 @@ type Manager struct {
 	buckets map[string]*UserBucket
 	rate    int64
 	cap     int64
+}
+
+// NewManager creates a per-user token-bucket manager with the given capacity and refill rate (tokens/sec).
+func NewManager(capacity, rate int64) *Manager {
+	return &Manager{
+		buckets: make(map[string]*UserBucket),
+		cap:     capacity,
+		rate:    rate,
+	}
 }
 
 func (m *Manager) Allow(userID string) bool {

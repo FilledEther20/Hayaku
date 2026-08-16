@@ -1,3 +1,4 @@
+// Package metrics wraps any RateLimiter and records per-request telemetry.
 package metrics
 
 import (

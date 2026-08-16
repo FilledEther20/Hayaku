@@ -56,21 +56,21 @@ Background drain() goroutine:
 hayaku/
 ├── cmd/hayaku/
 │   └── main.go
+├── ratelimiter/
+│   ├── limiter.go               # RateLimiter interface
+│   ├── token_bucket.go          # Channel-based token bucket
+│   ├── manager.go               # Per-user bucket manager + sweeper
+│   └── sliding_window_redis.go  # Redis ZSET + atomic Lua script
+├── metrics/
+│   ├── event.go                 # RequestEvent, DenyReasonEnum
+│   ├── collector.go             # MetricStore, Snapshot
+│   └── instrumented.go         # InstrumentedLimiter — wraps any RateLimiter
 ├── internal/
 │   ├── api/
-│   │   └── handler.go               # HTTP handler — rate limit → 429/202
-│   ├── core/
-│   │   ├── limiter.go               # RateLimiter interface
-│   │   ├── job.go                   # Job interface
-│   │   └── queue.go                 # Queue interface
-│   ├── ratelimiter/
-│   │   ├── token_bucket.go          # Channel-based token bucket
-│   │   ├── manager.go               # Per-user bucket manager + sweeper
-│   │   └── sliding_window_redis.go  # Redis ZSET + atomic Lua script
-│   └── metrics/
-│       ├── event.go                 # RequestEvent, DenyReasonEnum
-│       ├── collector.go             # MetricStore, Snapshot
-│       └── instrumented.go         # InstrumentedLimiter — wraps any RateLimiter
+│   │   └── handler.go           # HTTP handler example — rate limit → 429/202
+│   └── core/
+│       ├── job.go               # Job interface
+│       └── queue.go             # Queue interface
 └── go.mod
 ```
 
@@ -81,6 +81,8 @@ hayaku/
 ### Basic — no metrics
 
 ```go
+import "github.com/FilledEther20/Hayaku/ratelimiter"
+
 rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 limiter := ratelimiter.NewSlidingWindowRedis(rdb, 2*time.Second, 5)
 
@@ -90,6 +92,11 @@ allowed := limiter.Allow("user_123")
 ### With metrics
 
 ```go
+import (
+    "github.com/FilledEther20/Hayaku/ratelimiter"
+    "github.com/FilledEther20/Hayaku/metrics"
+)
+
 base    := ratelimiter.NewSlidingWindowRedis(rdb, 2*time.Second, 5)
 limiter := metrics.NewInstrumentedLimiter(base, 1024) // bufferSize=1024
 defer limiter.Stop()
@@ -107,7 +114,7 @@ fmt.Println(snap.DenialReasons)
 
 ```go
 // optional import — users who don't want OTel never compile it
-import hkotel "github.com/FilledEther20/Hayaku/internal/metrics/otel"
+import hkotel "github.com/FilledEther20/Hayaku/metrics/otel"
 
 limiter := metrics.NewInstrumentedLimiter(base, 1024,
     metrics.WithEmitter(hkotel.New(otel.GetMeterProvider())),
@@ -199,7 +206,7 @@ go run ./cmd/hayaku
 
 ## Roadmap
 
-- [ ] OpenTelemetry emitter (`internal/metrics/otel`)
+- [ ] OpenTelemetry emitter (`metrics/otel`)
 - [ ] Functional options on `NewInstrumentedLimiter`
 - [ ] Benchmark suite — p99 latency under concurrent load
 - [ ] `NOSCRIPT` retry on Redis restart

@@ -1,20 +1,21 @@
+// Package metrics wraps any RateLimiter and records per-request telemetry.
 package metrics
 
 import (
 	"time"
 
-	"github.com/FilledEther20/Hayaku/internal/core"
+	"github.com/FilledEther20/Hayaku/ratelimiter"
 )
 
 type InstrumentedLimiter struct {
-	inner  core.RateLimiter
+	inner  ratelimiter.RateLimiter
 	events chan RequestEvent
 	store  *MetricStore
 	done   chan struct{}
 }
 
-// bufferSize controls how many events can queue before drops occur.
-func NewInstrumentedLimiter(inner core.RateLimiter, bufferSize int) *InstrumentedLimiter {
+// NewInstrumentedLimiter wraps inner and records telemetry; bufferSize controls event queue depth before drops.
+func NewInstrumentedLimiter(inner ratelimiter.RateLimiter, bufferSize int) *InstrumentedLimiter {
 	il := &InstrumentedLimiter{
 		inner:  inner,
 		events: make(chan RequestEvent, bufferSize),

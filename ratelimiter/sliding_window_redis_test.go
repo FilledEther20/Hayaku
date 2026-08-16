@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FilledEther20/Hayaku/internal/ratelimiter"
+	"github.com/FilledEther20/Hayaku/ratelimiter"
 	"github.com/redis/go-redis/v9"
 )
 

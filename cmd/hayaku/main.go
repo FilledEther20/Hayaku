@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/FilledEther20/Hayaku/internal/metrics"
-	"github.com/FilledEther20/Hayaku/internal/ratelimiter"
+	"github.com/FilledEther20/Hayaku/metrics"
+	"github.com/FilledEther20/Hayaku/ratelimiter"
 	"github.com/redis/go-redis/v9"
 )
 
