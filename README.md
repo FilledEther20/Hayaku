@@ -1,228 +1,355 @@
-# Hayaku
-
-**Hayaku** is a Go rate limiting library with a built-in async telemetry pipeline. It answers two questions for any backend service:
-1. **Is this request rate limited?**
-2. **What are the metrics — region, time, failure reason — for analysis?**
-
----
-
-## Features
-
-- **Two rate limiting strategies** — Token Bucket (in-memory, per-user) and Sliding Window (Redis-backed, distributed)
-- **Async telemetry pipeline** — every request fires a non-blocking event; a background goroutine writes metrics without adding latency to the request path
-- **Pluggable emitters** — default in-memory store for `GetMetrics()`; optional OpenTelemetry integration for Grafana/Datadog dashboards (coming)
-- **Pluggable `RateLimiter` interface** — swap strategies without touching application code
-- **Automatic bucket cleanup** — Manager sweeper reclaims goroutines and memory for inactive users
+<p align="center">
+  <img src="https://img.shields.io/badge/Go-1.23+-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go Version" />
+  <img src="https://img.shields.io/badge/Redis-v9-DC382D?style=for-the-badge&logo=redis&logoColor=white" alt="Redis Version" />
+  <img src="https://img.shields.io/badge/OpenTelemetry-Compatible-F5A800?style=for-the-badge&logo=opentelemetry&logoColor=white" alt="OpenTelemetry" />
+  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License" />
+</p>
 
 ---
 
-## Architecture
+**Hayaku** (`早く` — *fast/early*) is a high-performance Go rate limiting library with a built-in zero-allocation asynchronous telemetry pipeline. It answers two critical questions for any backend service:
+
+1. 🚦 **Is this request rate limited?**
+2. 📊 **What are the real-time metrics (region, latency, failure reason) for telemetry and auditing?**
+
+---
+
+## 🌟 Key Features
+
+* 🎯 **Multi-Tier Configurable Policies** — Define burst capacity and refill rates per user tier (`Free`, `Pro`, `Enterprise`, `RBAC`) with dynamic $\mathcal{O}(1)$ policy resolution.
+* 🔄 **Dual Rate Limiting Strategies** — In-memory Token Bucket for microsecond local checks and Redis-backed Sliding Window for distributed consistency.
+* ⚡ **Zero-Latency Async Telemetry** — Non-blocking buffered event loop offloads metric emission from the hot request path.
+* 🔌 **Pluggable Metric Emitters** — Built-in atomic memory store with instant snapshotting and native OpenTelemetry integration for Datadog, Prometheus, and Grafana.
+* 🧩 **Pluggable `RateLimiter` Interface** — Hot-swap underlying algorithms or policy managers without refactoring application business logic.
+* 🧹 **Automatic Bucket Sweeper** — Background TTL worker dynamically reclaims inactive memory and handles tier migrations gracefully.
+
+---
+
+## 🏗️ Architecture
+
 
 ```
-Client Request
-     │
-     ▼
-InstrumentedLimiter.Allow(userID, ip, region)
-     │
-     ├── inner.Allow(userID)           ← actual rate limit check
-     │        │
-     │   ┌────┴────────────────────────────────┐
-     │   │  Strategy A: Token Bucket           │
-     │   │  In-memory, per-user, no deps       │
-     │   ├─────────────────────────────────────┤
-     │   │  Strategy B: Sliding Window Redis   │
-     │   │  Distributed, Lua atomic script     │
-     │   └─────────────────────────────────────┘
-     │
-     ├── fire RequestEvent to buffered channel (non-blocking, drop if full)
-     │
-     └── return bool immediately
 
-Background drain() goroutine:
-     reads channel → Emitter.Emit(event)
-          │
-     ┌────┴──────────────────────────────┐
-     │  InMemoryEmitter (default)        │  → GetMetrics() Snapshot
-     ├───────────────────────────────────┤
-     │  OTelEmitter (optional import)    │  → Grafana / Datadog / Prometheus
-     └───────────────────────────────────┘
+```
+                         Client Request
+                               │
+                               ▼
+          InstrumentedLimiter.Allow(userID, ip, region)
+                               │
+   ┌───────────────────────────┴───────────────────────────┐
+   ▼                                                       ▼
+
+```
+
+[ inner.Allow(userID) ]                                [ Async Telemetry ]
+│                                                       │
+┌────┴──────────────────────────────────────────┐    Non-blocking push
+│ 🔹 Strategy A: Multi-Policy Token Bucket      │    to buffered channel
+│    (In-Memory, O(1) dynamic tier resolution)  │            │
+├───────────────────────────────────────────────┤            ▼
+│ 🔹 Strategy B: Single-Tier Token Bucket       │    Background drain() loop
+│    (In-Memory, uniform global quotas)         │            │
+├───────────────────────────────────────────────┤            ▼
+│ 🔹 Strategy C: Sliding Window Redis           │    [ Emitter.Emit(event) ]
+│    (Distributed, Atomic Lua script)           │     ├── InMemoryEmitter
+└───────────────────────────────────────────────┘     └── OpenTelemetry Emitter
+│
+▼
+Return bool immediately
+
 ```
 
 ---
 
-## Project Structure
+## 📂 Project Structure
 
-```
+```text
 hayaku/
-├── cmd/hayaku/
-│   └── main.go
-├── ratelimiter/
-│   ├── limiter.go               # RateLimiter interface
-│   ├── token_bucket.go          # Channel-based token bucket
-│   ├── manager.go               # Per-user bucket manager + sweeper
-│   └── sliding_window_redis.go  # Redis ZSET + atomic Lua script
-├── metrics/
-│   ├── event.go                 # RequestEvent, DenyReasonEnum
-│   ├── collector.go             # MetricStore, Snapshot
-│   └── instrumented.go         # InstrumentedLimiter — wraps any RateLimiter
-├── internal/
-│   ├── api/
-│   │   └── handler.go           # HTTP handler example — rate limit → 429/202
-│   └── core/
-│       ├── job.go               # Job interface
-│       └── queue.go             # Queue interface
-└── go.mod
+├── 📁 cmd/
+│   └── 📁 hayaku/
+│       └── main.go                   # Example entrypoint & server wiring
+├── 📁 ratelimiter/
+│   ├── limiter.go                    # RateLimiter & PolicyRateLimiter interfaces
+│   ├── policy.go                     # Policy struct, validation & PolicyResolver
+│   ├── policy_manager.go             # Multi-tier PolicyManager + sweeper lifecycle
+│   ├── policy_test.go                # Dynamic migration & race-condition tests
+│   ├── token_bucket.go               # Channel/Atomic token bucket implementation
+│   ├── token_bucket_test.go          # Token bucket concurrency unit tests
+│   ├── manager.go                    # Single-tier bucket manager
+│   ├── sliding_window_redis.go       # Redis ZSET + atomic Lua script backend
+│   └── sliding_window_redis_test.go  # Redis integration tests
+├── 📁 metrics/
+│   ├── event.go                      # RequestEvent & DenyReason definitions
+│   ├── collector.go                  # Thread-safe MetricStore & Snapshots
+│   └── instrumented.go               # InstrumentedLimiter decorator
+├── 📁 internal/
+│   ├── 📁 api/
+│   │   └── handler.go                # HTTP middleware (429 Too Many Requests / 202)
+│   └── 📁 core/
+│       ├── job.go                    # Job execution interfaces
+│       └── queue.go                  # Queue orchestration interfaces
+├── go.mod
+└── go.sum
+
 ```
 
 ---
 
-## Usage
+## 🚀 Quickstart & Usage
 
-### Basic — no metrics
+### 1. Multi-Tier Policies (In-Memory)
+
+Map incoming users or API keys directly to dynamic service tiers:
 
 ```go
-import "github.com/FilledEther20/Hayaku/ratelimiter"
+package main
 
-rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-limiter := ratelimiter.NewSlidingWindowRedis(rdb, 2*time.Second, 5)
+import (
+	"fmt"
 
-allowed := limiter.Allow("user_123")
+	"[github.com/FilledEther20/Hayaku/ratelimiter](https://github.com/FilledEther20/Hayaku/ratelimiter)"
+)
+
+func main() {
+	limiter, err := ratelimiter.NewPolicyManager(ratelimiter.PolicyManagerConfig{
+		DefaultPolicy: ratelimiter.Policy{
+			Name:     "free",
+			Capacity: 100, // Max burst tokens
+			Rate:     2,   // Tokens refilled per second
+		},
+		Policies: []ratelimiter.Policy{
+			{Name: "pro", Capacity: 1000, Rate: 20},
+			{Name: "enterprise", Capacity: 10000, Rate: 200},
+		},
+		Resolver: func(userID string) string {
+			// Extract tier from JWT claims, session, or database cache
+			return getUserPlan(userID)
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// Evaluates quota against resolved policy
+	if !limiter.Allow("user_9842") {
+		fmt.Println("HTTP 429: Rate limit exceeded")
+	}
+}
+
 ```
 
-### With metrics
+> [!TIP]
+> **Explicit Policy Overrides:** If rate limits depend on dynamic route cost instead of user tier, invoke policy evaluation directly:
+> ```go
+> allowed := limiter.AllowWithPolicy("user_9842", "enterprise")
+> 
+> ```
+> 
+> 
+
+---
+
+### 2. Role-Based Access Control (RBAC)
+
+```go
+limiter, err := ratelimiter.NewPolicyManager(ratelimiter.PolicyManagerConfig{
+	DefaultPolicy: ratelimiter.Policy{Name: "guest", Capacity: 50, Rate: 1},
+	Policies: []ratelimiter.Policy{
+		{Name: "user", Capacity: 500, Rate: 10},
+		{Name: "moderator", Capacity: 5000, Rate: 100},
+		{Name: "admin", Capacity: 50000, Rate: 1000},
+	},
+	Resolver: func(userID string) string {
+		return authService.GetRole(userID) // e.g. "admin", "moderator", "user"
+	},
+})
+
+```
+
+---
+
+### 3. Distributed Sliding Window (Redis)
+
+For horizontally scaled architectures requiring cluster-wide synchronization:
+
+```go
+package main
+
+import (
+	"time"
+
+	"[github.com/FilledEther20/Hayaku/ratelimiter](https://github.com/FilledEther20/Hayaku/ratelimiter)"
+	"[github.com/redis/go-redis/v9](https://github.com/redis/go-redis/v9)"
+)
+
+func main() {
+	rdb := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+	})
+
+	// 5 requests allowed per 2-second sliding window
+	limiter := ratelimiter.NewSlidingWindowRedis(rdb, 2*time.Second, 5)
+
+	allowed := limiter.Allow("user_123")
+	if !allowed {
+		// handle rate limit
+	}
+}
+
+```
+
+---
+
+### 4. Zero-Overhead Async Telemetry
+
+Wrap any standard `RateLimiter` with non-blocking metric collection:
+
+```go
+package main
+
+import (
+	"fmt"
+	"time"
+
+	"[github.com/FilledEther20/Hayaku/metrics](https://github.com/FilledEther20/Hayaku/metrics)"
+	"[github.com/FilledEther20/Hayaku/ratelimiter](https://github.com/FilledEther20/Hayaku/ratelimiter)"
+	"[github.com/redis/go-redis/v9](https://github.com/redis/go-redis/v9)"
+)
+
+func main() {
+	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+	base := ratelimiter.NewSlidingWindowRedis(rdb, 2*time.Second, 5)
+
+	// Buffer up to 1024 events in memory before non-blocking drop
+	limiter := metrics.NewInstrumentedLimiter(base, 1024)
+	defer limiter.Stop()
+
+	// Record request with metadata
+	allowed := limiter.Allow("user_123", "203.0.113.1", "IN")
+
+	// Export thread-safe telemetry snapshot
+	snap := limiter.GetMetrics()
+	fmt.Printf("Total: %d | Allowed: %d | Rejected: %d\n", snap.Total, snap.Allowed, snap.Rejected)
+	fmt.Println("Traffic by Region:", snap.ByRegion) // map[IN:9 US:3]
+	fmt.Println("Denial Reasons:", snap.DenialReasons)
+}
+
+```
+
+---
+
+### 5. OpenTelemetry Integration *(Upcoming)*
 
 ```go
 import (
-    "github.com/FilledEther20/Hayaku/ratelimiter"
-    "github.com/FilledEther20/Hayaku/metrics"
+	"go.opentelemetry.io/otel"
+	hkotel "[github.com/FilledEther20/Hayaku/metrics/otel](https://github.com/FilledEther20/Hayaku/metrics/otel)"
 )
-
-base    := ratelimiter.NewSlidingWindowRedis(rdb, 2*time.Second, 5)
-limiter := metrics.NewInstrumentedLimiter(base, 1024) // bufferSize=1024
-defer limiter.Stop()
-
-allowed := limiter.Allow("user_123", "203.0.113.1", "IN")
-
-snap := limiter.GetMetrics()
-fmt.Println(snap.Total, snap.Allowed, snap.Rejected)
-fmt.Println(snap.ByRegion)   // map[IN:9]
-fmt.Println(snap.ByHour)     // map[14:9]  ← UTC hour
-fmt.Println(snap.DenialReasons)
-```
-
-### With OpenTelemetry (coming)
-
-```go
-// optional import — users who don't want OTel never compile it
-import hkotel "github.com/FilledEther20/Hayaku/metrics/otel"
 
 limiter := metrics.NewInstrumentedLimiter(base, 1024,
-    metrics.WithEmitter(hkotel.New(otel.GetMeterProvider())),
+	metrics.WithEmitter(hkotel.New(otel.GetMeterProvider())),
 )
-// metrics flow to Grafana / Datadog / Prometheus automatically
+// Metrics pipe directly to Grafana / Datadog / Prometheus agent
+
 ```
 
 ---
 
-## Rate Limiting Strategies
+## ⚙️ Rate Limiting Mechanics
 
-### Token Bucket (in-memory)
+| Strategy | Backend | Concurrency Model | Best For |
+| --- | --- | --- | --- |
+| **Multi-Policy Token Bucket** | In-Memory | Lock-free / RWMutex atomic sync | Multi-tenant SaaS with per-tier quotas |
+| **Token Bucket** | In-Memory | Pure Go channel select / tickers | Single-instance microservices & Daemons |
+| **Sliding Window** | Redis (ZSET) | Atomic Lua script execution | Distributed APIs & horizontally scaled pods |
 
-```go
-bucket := ratelimiter.NewTokenBucket(capacity, rate) // capacity=burst, rate=tokens/sec
-bucket.Start(ctx)        // starts background refill goroutine
+### 🛠️ Redis Sliding Window Lua Lifecycle
 
-bucket.Wait(ctx)         // blocks until token available
-```
+When using `SlidingWindowRedis`, each request executes an atomic script:
 
-The `Manager` gives each user their own bucket, created lazily on first request:
-
-```go
-manager.Allow("user_123")            // creates bucket on first call
-manager.StartSweeper(ctx, 1*time.Hour) // cancels and removes inactive buckets
-```
-
-### Sliding Window (Redis)
-
-```go
-limiter := ratelimiter.NewSlidingWindowRedis(rdb, 2*time.Second, 5)
-limiter.Allow("user_123")
-```
-
-Atomic Lua script per request:
-1. `ZREMRANGEBYSCORE` — remove entries outside the window
-2. `ZCARD` — count remaining
-3. `ZADD` — add if under limit
-4. `EXPIRE` — set TTL to bound memory
-
-Redis key: `ratelimit:<userID>`
+1. `ZREMRANGEBYSCORE` — Evicts expired timestamps outside the rolling window.
+2. `ZCARD` — Counts current requests within the active interval.
+3. `ZADD` — Appends current millisecond timestamp if capacity permits.
+4. `EXPIRE` — Refreshes key TTL to ensure dead keys are automatically purged.
 
 ---
 
-## Telemetry
+## 📊 Telemetry Schema
 
-Every call to `Allow()` records:
+Every request evaluated via `InstrumentedLimiter` collects:
 
-| Field | Description |
-|-------|-------------|
-| `Timestamp` | UTC time of request |
-| `UserID` | from `X-User-ID` header or caller |
-| `IP` | client IP |
-| `Region` | e.g. `CF-IPCountry` header value |
-| `Allowed` | bool |
-| `Reason` | `None` / `RateLimited` / `BackendDown` / `NetworkError` |
-| `Latency` | time spent in `Allow()` |
-
-`GetMetrics()` returns a deep-copy snapshot — safe to read while the limiter continues writing.
+| Field | Type | Description |
+| --- | --- | --- |
+| `Timestamp` | `time.Time` | UTC timestamp of request arrival |
+| `UserID` | `string` | Identifier extracted from header or context |
+| `IP` | `string` | Client IP address for geo and abuse tracking |
+| `Region` | `string` | Edge region header (e.g. `CF-IPCountry`, `X-Region`) |
+| `Allowed` | `bool` | Immediate evaluation verdict |
+| `Reason` | `DenyReason` | `None`, `RateLimited`, `BackendDown`, `NetworkError` |
+| `Latency` | `time.Duration` | Microsecond execution time of `Allow()` |
 
 ---
 
-## HTTP API
+## 📡 HTTP Status Codes Reference
 
-```
+```http
 POST /jobs/submit
-Header: X-User-ID: <id>
+Header: X-User-ID: usr_8371a
 
-202 Accepted          — allowed
-429 Too Many Requests — rate limited
-503 Service Unavailable — queue full
+HTTP/1.1 202 Accepted             -> Request permitted and queued
+HTTP/1.1 429 Too Many Requests    -> Rate limit quota exhausted
+HTTP/1.1 503 Service Unavailable  -> Upstream executor or queue saturated
+
 ```
 
 ---
 
-## Getting Started
+## 🛠️ Getting Started
+
+### Prerequisites
+
+* **Go**: `1.23` or higher
+* **Redis**: `v7.0+` (optional, only required for distributed sliding window)
 
 ```bash
-git clone https://github.com/FilledEther20/Hayaku.git
+# Clone the repository
+git clone [https://github.com/FilledEther20/Hayaku.git](https://github.com/FilledEther20/Hayaku.git)
 cd Hayaku
+
+# Install dependencies
 go mod download
-redis-server &
+
+# Run tests
+go test -v -race ./...
+
+# Run example binary
 go run ./cmd/hayaku
+
 ```
 
-**Prerequisites**: Go 1.23+, Redis
+---
+
+## 🗺️ Roadmap
+
+* [x] Configurable multi-tier rate limiting policies (`ratelimiter.PolicyManager`)
+* [x] In-memory Token Bucket with automated TTL sweeper
+* [x] Distributed Redis Sliding Window with atomic Lua scripting
+* [ ] OpenTelemetry native exporter module (`metrics/otel`)
+* [ ] Functional options constructor pattern for `NewInstrumentedLimiter`
+* [ ] Benchmark suite measuring p99 latency under 100k concurrent req/sec
+* [ ] Automatic `NOSCRIPT` fallback and reload recovery on Redis restart
 
 ---
 
-## Roadmap
+## 📦 Dependencies
 
-- [ ] OpenTelemetry emitter (`metrics/otel`)
-- [ ] Functional options on `NewInstrumentedLimiter`
-- [ ] Benchmark suite — p99 latency under concurrent load
-- [ ] `NOSCRIPT` retry on Redis restart
-- [ ] HTTP server wired in `main.go`
-
----
-
-## Dependencies
-
-| Module | Purpose |
-|--------|---------|
-| `github.com/redis/go-redis/v9` | Sliding window rate limit + optional Redis metrics |
-| `github.com/google/uuid` | Unique member IDs in sliding window ZSET |
+| Dependency | Version | Purpose |
+| --- | --- | --- |
+| [`github.com/redis/go-redis/v9`](https://github.com/redis/go-redis) | `v9.x` | Redis client for distributed sliding window state |
+| [`github.com/google/uuid`](https://github.com/google/uuid) | `v1.x` | High-entropy unique member IDs in Redis ZSET |
 
 ---
 
-## License
+## 📄 License
 
-MIT © 2025 Chaitanya Gairola
+Distributed under the **MIT License**. See `LICENSE` for more information.
